@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>牛顿环可疑数据分析工具 </title>
+<style>
+*{box-sizing:border-box;font-family:"Microsoft YaHei",sans-serif}
+body{padding:20px;max-width:1400px;margin:0 auto}
+h2{margin-top:0}
+.ctrl-box{margin-bottom:12px;padding:10px;border:1px solid #ccc;background:#f7f7f7}
+textarea{width:100%;height:80px;padding:6px;font-size:14px}
+button{padding:8px 14px;margin:4px;font-size:14px;cursor:pointer}
+table{border-collapse:collapse;width:100%;margin-top:10px}
+th,td{border:1px solid #666;padding:6px 4px;text-align:center}
+input{width:95%;padding:3px;border:1px solid #aaa;font-size:14px}
+.warn-yellow{background:#fff280 !important;}
+.warn-red{background:#ff7777 !important;color:#000}
+.text-red{color:#d62728;font-weight:bold}
+.msg{padding:8px;margin:8px 0;border-radius:4px;line-height:1.6}
+.msg-error{background:#ffe9e9;border:1px solid #f44}
+.msg-ok{background:#e9ffe9;border:1px solid #2a2}
+</style>
+</head>
+<body>
+<h2>牛顿环可疑数据分析工具</h2>
+<div class="ctrl-box">
+  <div>批量粘贴导入（格式：级次K  x左  x右，空格/制表符分隔，一行一条）：</div>
+  <textarea id="pasteArea" placeholder="示例：
+11 32.125 28.330
+12 32.240 28.212
+13 32.351 28.100
+14 32.463 27.986
+15 32.572 27.871
+"></textarea>
+  <br>
+  <button onclick="importData()">粘贴导入</button>
+  <button onclick="addRow()">增加一行</button>
+  <button onclick="calcAll()">全部计算</button>
+  <button onclick="clearAll()">清空全部</button>
+</div>
+<div id="msgBox" class="msg msg-ok">等待输入数据，点击【全部计算】</div>
+<table id="mainTable">
+<thead>
+  <tr>
+    <th>级次K</th>
+    <th>x左</th>
+    <th>x右</th>
+    <th>y=D²</th>
+    <th>b<sub>K</sub></th>
+    <th>E<sub>bK</sub></th>
+    <th>x左斜率</th>
+    <th>左斜率比</th>
+    <th>x右斜率</th>
+    <th>右斜率比</th>
+  </tr>
+</thead>
+<tbody id="tbody">
+</tbody>
+</table>
+
+<script>
+const tbody = document.getElementById('tbody');
+const msgBox = document.getElementById('msgBox');
+
+// 新增一行
+function addRow(kVal='', xl='', xr=''){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input class="k" value="${kVal}"></td>
+    <td><input class="xl" value="${xl}"></td>
+    <td><input class="xr" value="${xr}"></td>
+    <td class="y"></td>
+    <td class="bk"></td>
+    <td class="ebk"></td>
+    <td class="slopeL"></td>
+    <td class="ratioL"></td>
+    <td class="slopeR"></td>
+    <td class="ratioR"></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+// 粘贴导入
+function importData(){
+  const txt = document.getElementById('pasteArea').value.trim();
+  if(!txt) return;
+  clearAll(true);
+  const lines = txt.split('\n');
+  lines.forEach(line=>{
+    const arr = line.trim().split(/\s+/);
+    if(arr.length>=3){
+      addRow(arr[0], arr[1], arr[2]);
+    }
+  })
+  setMsg("导入完成，请点【全部计算】","ok");
+}
+
+function clearAll(keepPaste=false){
+  tbody.innerHTML='';
+  if(!keepPaste) document.getElementById('pasteArea').value='';
+  setMsg("已清空","ok");
+}
+
+function setMsg(htmlText,type="ok"){
+  msgBox.innerHTML = htmlText;
+  msgBox.className = 'msg '+(type==='error'?'msg-error':'msg-ok');
+}
+
+// 核心计算
+function calcAll(){
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  let data = [];
+  // 读取原始数据
+  for(let r of rows){
+    const k = parseFloat(r.querySelector('.k').value);
+    const xl = parseFloat(r.querySelector('.xl').value);
+    const xr = parseFloat(r.querySelector('.xr').value);
+    if(isNaN(k)||isNaN(xl)||isNaN(xr)){
+      r.querySelectorAll('td').forEach(td=>{td.className='';td.innerText=''});
+      continue;
+    }
+    data.push({
+      dom:r,
+      K:k,
+      xL:xl,
+      xR:xr,
+      y:0,
+      bk:0,
+      ebk:null,
+      slopeL:0,
+      ratioL:null,
+      slopeR:0,
+      ratioR:null
+    })
+  }
+  if(data.length<2){
+    setMsg("至少输入2组数据才能计算斜率、比值！","error");
+    return;
+  }
+  // 按K从小到大排序
+  data.sort((a,b)=>a.K - b.K);
+  // 检查K序号显性跳变
+  let leakTip = "";
+  for(let i=1;i<data.length;i++){
+    const diff = data[i].K - data[i-1].K;
+    if(diff !== 1){
+      leakTip += `⚠️ K=${data[i-1].K} 到 K=${data[i].K} 不连续，间隔${diff}；`
+    }
+  }
+
+  // 逐行计算
+  for(let i=0;i<data.length;i++){
+    const d = data[i];
+    // y = D² = (x左 - x右)^2
+    d.y = Math.pow(d.xL - d.xR, 2);
+    d.dom.querySelector('.y').innerText = d.y.toFixed(5);
+
+    if(i>0){
+      const prev = data[i-1];
+      // bK = |yK - yK‑1|
+      d.bk = Math.abs(d.y - prev.y);
+      d.dom.querySelector('.bk').innerText = d.bk.toFixed(5);
+
+      // ========== 修改：分母改为 prev.bk (b_{K‑1}) ==========
+      if(prev.bk !== undefined && prev.bk>0){
+        d.ebk = Math.abs(d.bk - prev.bk) / prev.bk;
+        d.dom.querySelector('.ebk').innerText = d.ebk.toFixed(4);
+      }
+
+      // 左斜率 = |xK左 - xK‑1左|
+      d.slopeL = Math.abs(d.xL - prev.xL);
+      d.dom.querySelector('.slopeL').innerText = d.slopeL.toFixed(5);
+      // 左斜率比 = slopeL / prev.slopeL
+      if(prev.slopeL>0){
+        d.ratioL = d.slopeL / prev.slopeL;
+        d.dom.querySelector('.ratioL').innerText = d.ratioL.toFixed(4);
+      }
+      // 右斜率 = |xK右 - xK‑1右|
+      d.slopeR = Math.abs(d.xR - prev.xR);
+      d.dom.querySelector('.slopeR').innerText = d.slopeR.toFixed(5);
+      // 右斜率比 = slopeR / prev.slopeR
+      if(prev.slopeR>0){
+        d.ratioR = d.slopeR / prev.slopeR;
+        d.dom.querySelector('.ratioR').innerText = d.ratioR.toFixed(4);
+      }
+    }else{
+      // 第一行，bk、ebk、斜率比无意义，置空
+      d.dom.querySelector('.bk').innerText = '-';
+      d.dom.querySelector('.ebk').innerText = '-';
+      d.dom.querySelector('.slopeL').innerText = '-';
+      d.dom.querySelector('.ratioL').innerText = '-';
+      d.dom.querySelector('.slopeR').innerText = '-';
+      d.dom.querySelector('.ratioR').innerText = '-';
+    }
+  }
+
+  // 统计EbK>0.2的行数（排除第一行无ebk）
+  let countEbOver02 = 0;
+  let validEbCount = 0;
+  for(let i=0;i<data.length;i++){
+    const d = data[i];
+    if(d.ebk !== null){
+      validEbCount +=1;
+      if(d.ebk>0.2) countEbOver02 +=1;
+    }
+  }
+  const warnLargeRandomError = (validEbCount>0) && (countEbOver02 / validEbCount > 0.25);
+
+  // 上色判据
+  let hasSlopeRatioAbnormal = false;
+  for(let i=0;i<data.length;i++){
+    const d = data[i];
+    // E_bK大于0.2标黄，大于0.3标红
+    if(d.ebk!==null){
+      const tdEb = d.dom.querySelector('.ebk');
+      tdEb.className='ebk';
+      if(d.ebk>0.3){
+        tdEb.className='ebk warn-red';
+      }else if(d.ebk>0.2){
+        tdEb.className='ebk warn-yellow';
+      }
+    }
+    // 左斜率比 <0.75 或 >1.25 →红色背景
+    if(d.ratioL!==null){
+      const tdRL = d.dom.querySelector('.ratioL');
+      tdRL.className='ratioL';
+      if(d.ratioL<0.75 || d.ratioL>1.25){
+        tdRL.className='ratioL warn-red';
+        hasSlopeRatioAbnormal=true;
+      }
+    }
+    // 右斜率比 <0.75 或 >1.25 →红色背景
+    if(d.ratioR!==null){
+      const tdRR = d.dom.querySelector('.ratioR');
+      tdRR.className='ratioR';
+      if(d.ratioR<0.75 || d.ratioR>1.25){
+        tdRR.className='ratioR warn-red';
+        hasSlopeRatioAbnormal=true;
+      }
+    }
+  }
+
+  // 组装提示消息
+  let msgLines=[];
+  if(leakTip) msgLines.push(leakTip);
+
+  if(hasSlopeRatioAbnormal){
+    msgLines.push('<span class="text-red">⚠️斜率比异常：大概率漏数级数</span>');
+  }
+  if(warnLargeRandomError){
+    msgLines.push('<span class="text-red">⚠️超过1/4行E_bK>0.2：误差过大、需重新测量</span>');
+  }
+
+  if(msgLines.length===0){
+    msgLines.push("✅计算完成，未检测到异常");
+  }
+
+  let finalMsg = msgLines.join('<br>');
+  const isError = leakTip || hasSlopeRatioAbnormal || warnLargeRandomError;
+  setMsg(finalMsg, isError?"error":"ok");
+}
+</script>
+</body>
+</html>
